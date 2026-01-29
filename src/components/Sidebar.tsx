@@ -11,6 +11,7 @@ interface SidebarProps {
   onSelectAll: () => void;
   onDeselectAll: () => void;
   onExport: () => void;
+  onExportPdf?: () => void;
   isExporting: boolean;
   onViewInTranscript?: (start: number, end: number) => void;
 }
@@ -22,6 +23,7 @@ export function Sidebar({
   onSelectAll,
   onDeselectAll,
   onExport,
+  onExportPdf,
   isExporting,
   onViewInTranscript,
 }: SidebarProps) {
@@ -102,17 +104,34 @@ export function Sidebar({
         ))}
       </div>
 
-      {/* Export button */}
-      <div className="p-4 border-t border-gray-200">
-        <button
-          onClick={onExport}
-          disabled={selectedIds.length === 0 || isExporting}
-          className="w-full py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors text-sm font-medium"
-        >
-          {isExporting
-            ? 'Exporting...'
-            : `Export ${selectedIds.length > 0 ? `(${selectedIds.length})` : ''}`}
-        </button>
+      {/* Export buttons */}
+      <div className="p-4 border-t border-gray-200 space-y-2">
+        <div className="flex gap-2">
+          <button
+            onClick={onExport}
+            disabled={selectedIds.length === 0 || isExporting}
+            className="flex-1 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors text-sm font-medium"
+          >
+            {isExporting ? 'Exporting...' : 'JSON'}
+          </button>
+          {onExportPdf && (
+            <button
+              onClick={onExportPdf}
+              disabled={selectedIds.length === 0 || isExporting}
+              className="flex-1 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors text-sm font-medium flex items-center justify-center gap-1"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+              </svg>
+              PDF
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-gray-400 text-center">
+          {selectedIds.length > 0
+            ? `Export ${selectedIds.length} selected suggestion${selectedIds.length > 1 ? 's' : ''}`
+            : 'Select suggestions to export'}
+        </p>
       </div>
     </div>
   );

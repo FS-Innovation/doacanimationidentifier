@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Chat } from '@/components/Chat';
 import { TranscriptInput } from '@/components/TranscriptInput';
 import { TranscriptViewer } from '@/components/TranscriptViewer';
@@ -17,6 +17,14 @@ interface SessionSummary {
   updatedAt: string;
 }
 
+interface SubAgentProgress {
+  completed: number;
+  total: number;
+  currentPages: number[];
+  hasInterestingContent: boolean;
+  briefSummary: string;
+}
+
 export default function Home() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState('');
@@ -31,6 +39,12 @@ export default function Home() {
   const [highlightLines, setHighlightLines] = useState<{ start: number; end: number } | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [showSessionDropdown, setShowSessionDropdown] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState<string>('');
+  const [subAgentProgress, setSubAgentProgress] = useState<SubAgentProgress | null>(null);
+  const [executiveBrief, setExecutiveBrief] = useState<string>('');
+  const [overallSummary, setOverallSummary] = useState<string>('');
+  const [mode, setMode] = useState<AnalysisMode>('mixed');
+  const pdfInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch sessions on mount
   useEffect(() => {
@@ -66,17 +80,107 @@ export default function Home() {
     }
   };
 
-  const handleAnalyze = useCallback(async (transcriptText: string, mode: AnalysisMode, customFocus?: string) => {
+  // Handle PDF upload
+  const handlePdfUpload = useCallback(async (file: File) => {
+    setIsAnalyzing(true);
+    setError(null);
+    setStreamingContent('');
+    setAnalysisStatus('Starting PDF analysis...');
+    setSubAgentProgress(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('mode', mode);
+
+      const response = await fetch('/api/analyze-pdf', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'PDF analysis failed');
+      }
+
+      // Handle streaming response
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (data.type === 'status') {
+                setAnalysisStatus(data.message);
+              } else if (data.type === 'session') {
+                setSessionId(data.sessionId);
+              } else if (data.type === 'subagent') {
+                setSubAgentProgress({
+                  completed: data.completed,
+                  total: data.total,
+                  currentPages: data.pageNumbers,
+                  hasInterestingContent: data.hasInterestingContent,
+                  briefSummary: data.briefSummary,
+                });
+              } else if (data.type === 'done') {
+                setSuggestions(data.suggestions);
+                setExecutiveBrief(data.executiveBrief || '');
+                setOverallSummary(data.summary || '');
+                setTranscript(`[PDF Document - ${data.pageCount} pages]\n\n${data.summary}`);
+                setMessages([
+                  {
+                    id: uuidv4(),
+                    role: 'assistant',
+                    content: `**Analysis Complete!**\n\n${data.executiveBrief}\n\n${data.summary}\n\nFound ${data.suggestions.length} animation-worthy sections across ${data.pageCount} pages.`,
+                    timestamp: new Date().toISOString(),
+                  },
+                ]);
+                setAnalysisStatus('');
+                setSubAgentProgress(null);
+                fetchSessions();
+              } else if (data.type === 'error') {
+                throw new Error(data.error);
+              }
+            } catch (parseErr) {
+              // Ignore parse errors
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong');
+      setAnalysisStatus('');
+      setSubAgentProgress(null);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [mode]);
+
+  const handleAnalyze = useCallback(async (transcriptText: string, analysisMode: AnalysisMode, customFocus?: string) => {
     setIsAnalyzing(true);
     setError(null);
     setStreamingContent('');
     setTranscript(transcriptText);
+    setMode(analysisMode);
 
     try {
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: transcriptText, mode, customFocus }),
+        body: JSON.stringify({ transcript: transcriptText, mode: analysisMode, customFocus }),
       });
 
       if (!response.ok) {
@@ -84,7 +188,6 @@ export default function Home() {
         throw new Error(data.error || 'Analysis failed');
       }
 
-      // Handle streaming response
       const reader = response.body?.getReader();
       if (!reader) throw new Error('No response body');
 
@@ -119,12 +222,12 @@ export default function Home() {
                   },
                 ]);
                 setStreamingContent('');
-                fetchSessions(); // Refresh session list
+                fetchSessions();
               } else if (data.type === 'error') {
                 throw new Error(data.error);
               }
             } catch (parseErr) {
-              // Ignore parse errors for incomplete chunks
+              // Ignore parse errors
             }
           }
         }
@@ -196,46 +299,71 @@ export default function Home() {
     setSelectedIds([]);
   }, []);
 
-  const handleExport = useCallback(async () => {
+  const handleExport = useCallback(async (format: 'json' | 'pdf' = 'json') => {
     if (!sessionId || selectedIds.length === 0) return;
 
     setIsExporting(true);
     setError(null);
 
     try {
-      const response = await fetch('/api/export', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, selectedIds }),
-      });
+      if (format === 'pdf') {
+        const response = await fetch('/api/export-pdf', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            selectedIds,
+            executiveBrief,
+            overallSummary,
+          }),
+        });
 
-      if (!response.ok) {
+        if (!response.ok) {
+          const data = await response.json();
+          throw new Error(data.error || 'PDF export failed');
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `tas-report-${new Date().toISOString().split('T')[0]}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        const response = await fetch('/api/export', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, selectedIds }),
+        });
+
+        if (!response.ok) {
+          const data = await response.json();
+          throw new Error(data.error || 'Export failed');
+        }
+
         const data = await response.json();
-        throw new Error(data.error || 'Export failed');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `animation-suggestions-${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
       }
-
-      const data = await response.json();
-
-      // Download as JSON file
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `animation-suggestions-${new Date().toISOString().split('T')[0]}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Export failed');
     } finally {
       setIsExporting(false);
     }
-  }, [sessionId, selectedIds]);
+  }, [sessionId, selectedIds, executiveBrief, overallSummary]);
 
   const handleViewInTranscript = useCallback((start: number, end: number) => {
     setHighlightLines({ start, end });
-    // Auto-clear highlight after 5 seconds
     setTimeout(() => setHighlightLines(null), 5000);
   }, []);
 
@@ -247,6 +375,10 @@ export default function Home() {
     setSelectedIds([]);
     setHighlightLines(null);
     setStreamingContent('');
+    setAnalysisStatus('');
+    setSubAgentProgress(null);
+    setExecutiveBrief('');
+    setOverallSummary('');
   }, []);
 
   return (
@@ -259,6 +391,32 @@ export default function Home() {
             <p className="text-sm text-gray-500">Transcript Animation Spotter</p>
           </div>
           <div className="flex items-center gap-4">
+            {/* PDF Upload Button */}
+            {!sessionId && (
+              <>
+                <input
+                  ref={pdfInputRef}
+                  type="file"
+                  accept=".pdf"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handlePdfUpload(file);
+                  }}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => pdfInputRef.current?.click()}
+                  disabled={isAnalyzing}
+                  className="text-sm px-3 py-1.5 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:bg-gray-300 flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                  </svg>
+                  Upload PDF
+                </button>
+              </>
+            )}
+
             {/* Session history dropdown */}
             <div className="relative">
               <button
@@ -356,7 +514,37 @@ export default function Home() {
             />
           )}
 
-          {/* Streaming indicator */}
+          {/* Analysis progress indicator */}
+          {isAnalyzing && (analysisStatus || subAgentProgress) && (
+            <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
+              <div className="flex items-center gap-2 text-sm text-gray-600 mb-2">
+                <div className="w-2 h-2 bg-gray-400 rounded-full animate-pulse" />
+                <span>{analysisStatus}</span>
+              </div>
+
+              {subAgentProgress && (
+                <div className="space-y-2">
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>Sub-agent {subAgentProgress.completed}/{subAgentProgress.total}</span>
+                    <span>Pages {subAgentProgress.currentPages.join('-')}</span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div
+                      className="bg-gray-600 h-2 rounded-full transition-all"
+                      style={{ width: `${(subAgentProgress.completed / subAgentProgress.total) * 100}%` }}
+                    />
+                  </div>
+                  {subAgentProgress.briefSummary && (
+                    <p className="text-xs text-gray-500 italic">
+                      {subAgentProgress.hasInterestingContent ? '✓' : '○'} {subAgentProgress.briefSummary}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Streaming indicator for text analysis */}
           {isAnalyzing && streamingContent && (
             <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
               <div className="flex items-center gap-2 text-sm text-gray-600">
@@ -387,7 +575,8 @@ export default function Home() {
             onToggleSelect={handleToggleSelect}
             onSelectAll={handleSelectAll}
             onDeselectAll={handleDeselectAll}
-            onExport={handleExport}
+            onExport={() => handleExport('json')}
+            onExportPdf={() => handleExport('pdf')}
             isExporting={isExporting}
             onViewInTranscript={handleViewInTranscript}
           />
