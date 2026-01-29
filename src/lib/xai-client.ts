@@ -63,6 +63,28 @@ If updating suggestions, format them as:
 Otherwise, just respond naturally to help the user.`;
 }
 
+function parseAnalysisResponse(content: string): { suggestions: AnimationSuggestion[]; summary: string } {
+  try {
+    const parsed = JSON.parse(content);
+    return {
+      suggestions: parsed.suggestions || [],
+      summary: parsed.summary || 'Analysis complete.',
+    };
+  } catch {
+    // Try to extract JSON from the response if it's wrapped in markdown
+    const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const jsonStr = jsonMatch[1] || jsonMatch[0];
+      const parsed = JSON.parse(jsonStr);
+      return {
+        suggestions: parsed.suggestions || [],
+        summary: parsed.summary || 'Analysis complete.',
+      };
+    }
+    throw new Error('Failed to parse xAI response as JSON');
+  }
+}
+
 export async function analyzeTranscript(
   transcript: string,
   mode: AnalysisMode,
@@ -107,26 +129,32 @@ export async function analyzeTranscript(
     throw new Error('No content in xAI response');
   }
 
-  try {
-    const parsed = JSON.parse(content);
-    return {
-      suggestions: parsed.suggestions || [],
-      summary: parsed.summary || 'Analysis complete.',
-    };
-  } catch {
-    // Try to extract JSON from the response if it's wrapped in markdown
-    const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const jsonStr = jsonMatch[1] || jsonMatch[0];
-      const parsed = JSON.parse(jsonStr);
-      return {
-        suggestions: parsed.suggestions || [],
-        summary: parsed.summary || 'Analysis complete.',
-      };
-    }
-    throw new Error('Failed to parse xAI response as JSON');
-  }
+  return parseAnalysisResponse(content);
 }
+
+export function getAnalyzeRequestBody(
+  transcript: string,
+  mode: AnalysisMode,
+  keywords?: string[],
+  customFocus?: string
+) {
+  const userMessage = keywords?.length
+    ? `Analyze this transcript with focus on keywords: ${keywords.join(', ')}\n\nTRANSCRIPT:\n${transcript}`
+    : `Analyze this transcript:\n\nTRANSCRIPT:\n${transcript}`;
+
+  return {
+    model: 'grok-4-1-fast-reasoning',
+    messages: [
+      { role: 'system', content: getSystemPrompt(mode, customFocus) },
+      { role: 'user', content: userMessage },
+    ],
+    temperature: 0.7,
+    max_tokens: 8000,
+    stream: true,
+  };
+}
+
+export { parseAnalysisResponse };
 
 export async function converse(
   sessionMessages: { role: 'user' | 'assistant'; content: string }[],
@@ -189,4 +217,21 @@ export async function converse(
   }
 
   return { reply, updatedSuggestions };
+}
+
+// Token estimation for cost calculation
+// Rough estimate: ~4 characters per token for English text
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+export function estimateCost(inputTokens: number, outputTokens: number = 8000): { input: number; output: number; total: number } {
+  // grok-4-1-fast-reasoning pricing: $0.20 / 1M input, $0.50 / 1M output
+  const inputCost = (inputTokens / 1_000_000) * 0.20;
+  const outputCost = (outputTokens / 1_000_000) * 0.50;
+  return {
+    input: inputCost,
+    output: outputCost,
+    total: inputCost + outputCost,
+  };
 }

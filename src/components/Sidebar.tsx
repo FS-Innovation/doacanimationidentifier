@@ -12,6 +12,7 @@ interface SidebarProps {
   onDeselectAll: () => void;
   onExport: () => void;
   isExporting: boolean;
+  onViewInTranscript?: (start: number, end: number) => void;
 }
 
 export function Sidebar({
@@ -22,6 +23,7 @@ export function Sidebar({
   onDeselectAll,
   onExport,
   isExporting,
+  onViewInTranscript,
 }: SidebarProps) {
   const [sortBy, setSortBy] = useState<'score' | 'position'>('score');
 
@@ -95,6 +97,7 @@ export function Sidebar({
             suggestion={suggestion}
             isSelected={selectedIds.includes(suggestion.id)}
             onToggleSelect={onToggleSelect}
+            onViewInTranscript={onViewInTranscript}
           />
         ))}
       </div>

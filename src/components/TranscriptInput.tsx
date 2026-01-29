@@ -1,20 +1,73 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { AnalysisMode } from '@/types';
 
 interface TranscriptInputProps {
   onAnalyze: (transcript: string, mode: AnalysisMode, customFocus?: string) => void;
   isLoading: boolean;
   hasSession: boolean;
+  transcript?: string;
+  onTranscriptChange?: (transcript: string) => void;
+  highlightLines?: { start: number; end: number } | null;
 }
 
-export function TranscriptInput({ onAnalyze, isLoading, hasSession }: TranscriptInputProps) {
-  const [transcript, setTranscript] = useState('');
+// Token estimation (~4 chars per token)
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function estimateCost(tokens: number): string {
+  // grok-4-1-fast-reasoning: $0.20/1M input, assume ~8000 output tokens at $0.50/1M
+  const inputCost = (tokens / 1_000_000) * 0.20;
+  const outputCost = (8000 / 1_000_000) * 0.50;
+  const total = inputCost + outputCost;
+  if (total < 0.01) return '<$0.01';
+  return `~$${total.toFixed(2)}`;
+}
+
+export function TranscriptInput({
+  onAnalyze,
+  isLoading,
+  hasSession,
+  transcript: externalTranscript,
+  onTranscriptChange,
+  highlightLines,
+}: TranscriptInputProps) {
+  const [internalTranscript, setInternalTranscript] = useState('');
   const [mode, setMode] = useState<AnalysisMode>('mixed');
   const [customFocus, setCustomFocus] = useState('');
   const [showOptions, setShowOptions] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lineNumbersRef = useRef<HTMLDivElement>(null);
+
+  const transcript = externalTranscript ?? internalTranscript;
+  const setTranscript = onTranscriptChange ?? setInternalTranscript;
+
+  const lines = transcript.split('\n');
+  const lineCount = lines.length;
+  const tokens = estimateTokens(transcript);
+  const cost = estimateCost(tokens);
+
+  // Sync scroll between textarea and line numbers
+  const handleScroll = useCallback(() => {
+    if (textareaRef.current && lineNumbersRef.current) {
+      lineNumbersRef.current.scrollTop = textareaRef.current.scrollTop;
+    }
+  }, []);
+
+  // Scroll to highlighted lines when they change
+  useEffect(() => {
+    if (highlightLines && textareaRef.current) {
+      const lineHeight = 20; // approximate line height in pixels
+      const scrollPosition = (highlightLines.start - 1) * lineHeight - 40;
+      textareaRef.current.scrollTop = Math.max(0, scrollPosition);
+      if (lineNumbersRef.current) {
+        lineNumbersRef.current.scrollTop = Math.max(0, scrollPosition);
+      }
+    }
+  }, [highlightLines]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -42,23 +95,7 @@ export function TranscriptInput({ onAnalyze, isLoading, hasSession }: Transcript
   };
 
   if (hasSession) {
-    return (
-      <div className="p-4 border-b border-gray-200">
-        <div className="flex items-center justify-between">
-          <div className="text-sm text-gray-500">
-            Transcript loaded ({transcript.length.toLocaleString()} characters)
-          </div>
-          <button
-            onClick={() => {
-              setTranscript('');
-            }}
-            className="text-sm text-gray-500 hover:text-gray-700 underline"
-          >
-            Load new transcript
-          </button>
-        </div>
-      </div>
-    );
+    return null; // Don't show input when session exists
   }
 
   return (
@@ -82,14 +119,50 @@ export function TranscriptInput({ onAnalyze, isLoading, hasSession }: Transcript
             className="hidden"
           />
         </div>
-        <textarea
-          value={transcript}
-          onChange={(e) => setTranscript(e.target.value)}
-          placeholder="Paste your transcript here..."
-          className="w-full h-40 px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:border-transparent resize-none text-sm"
-        />
-        <div className="text-xs text-gray-400 mt-1">
-          {transcript.length.toLocaleString()} characters
+
+        {/* Textarea with line numbers */}
+        <div className="relative flex border border-gray-300 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-gray-400 focus-within:border-transparent">
+          {/* Line numbers column */}
+          <div
+            ref={lineNumbersRef}
+            className="bg-gray-50 text-gray-400 text-xs font-mono select-none overflow-hidden border-r border-gray-200 py-2"
+            style={{ width: '40px', height: '160px' }}
+          >
+            {Array.from({ length: Math.max(lineCount, 8) }, (_, i) => (
+              <div
+                key={i}
+                className={`px-2 text-right leading-5 ${
+                  highlightLines &&
+                  i + 1 >= highlightLines.start &&
+                  i + 1 <= highlightLines.end
+                    ? 'bg-gray-200 text-gray-600 font-medium'
+                    : ''
+                }`}
+              >
+                {i + 1}
+              </div>
+            ))}
+          </div>
+
+          {/* Textarea */}
+          <textarea
+            ref={textareaRef}
+            value={transcript}
+            onChange={(e) => setTranscript(e.target.value)}
+            onScroll={handleScroll}
+            placeholder="Paste your transcript here..."
+            className="flex-1 h-40 px-3 py-2 bg-white text-gray-900 placeholder-gray-400 focus:outline-none resize-none text-sm font-mono leading-5"
+          />
+        </div>
+
+        {/* Stats row */}
+        <div className="flex justify-between text-xs text-gray-400 mt-1">
+          <span>
+            {transcript.length.toLocaleString()} chars · {lineCount.toLocaleString()} lines · ~{tokens.toLocaleString()} tokens
+          </span>
+          <span className="text-gray-500">
+            Est. cost: {cost}
+          </span>
         </div>
       </div>
 
